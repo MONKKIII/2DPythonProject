@@ -71,6 +71,10 @@ class GameClient:
         self.dungeon_notifications = []  # Notifications de donjon (boss spawn, etc.)
         self.boss_abilities_log = []  # Log des capacités de boss
         
+        # Inventory system
+        self.inventory_scroll = 0  # Défilement de l'inventaire
+        self.max_inventory_lines = 6  # Nombre maximum de lignes visibles dans l'inventaire (ajusté pour l'espace réel)
+        
         # Input
         self.keys_pressed = set()
         self.player_name = ""
@@ -263,6 +267,9 @@ class GameClient:
                         self.show_stats_panel = not self.show_stats_panel
                     elif event.key == pygame.K_i:
                         self.show_inventory = not self.show_inventory
+                        # Réinitialiser le défilement quand on ouvre l'inventaire
+                        if self.show_inventory:
+                            self.inventory_scroll = 0
                     elif event.key == pygame.K_m:
                         self.show_minimap = not self.show_minimap
                     elif event.key == pygame.K_h:
@@ -276,6 +283,14 @@ class GameClient:
                     elif event.key == pygame.K_r:  # Touche R pour quitter le donjon actuel
                         if self.current_dungeon:
                             self.leave_current_dungeon()
+                    elif event.key == pygame.K_UP and self.show_inventory:  # Défiler vers le haut dans l'inventaire
+                        self.inventory_scroll = max(0, self.inventory_scroll - 1)
+                    elif event.key == pygame.K_DOWN and self.show_inventory:  # Défiler vers le bas dans l'inventaire
+                        if self.my_player_id in self.players:
+                            player = self.players[self.my_player_id]
+                            inventory = player.get('inventory', {})
+                            max_scroll = max(0, len(inventory) - self.max_inventory_lines)
+                            self.inventory_scroll = min(max_scroll, self.inventory_scroll + 1)
                     elif event.key == pygame.K_1 and self.show_stats_panel:
                         self.upgrade_stat('attack')
                     elif event.key == pygame.K_2 and self.show_stats_panel:
@@ -310,6 +325,14 @@ class GameClient:
                     else:
                         # Sinon attaquer un monstre
                         self.attack_monster_at_position(mouse_pos)
+                elif event.button == 4 and self.show_inventory:  # Molette vers le haut
+                    self.inventory_scroll = max(0, self.inventory_scroll - 1)
+                elif event.button == 5 and self.show_inventory:  # Molette vers le bas
+                    if self.my_player_id in self.players:
+                        player = self.players[self.my_player_id]
+                        inventory = player.get('inventory', {})
+                        max_scroll = max(0, len(inventory) - self.max_inventory_lines)
+                        self.inventory_scroll = min(max_scroll, self.inventory_scroll + 1)
     
     def join_game(self):
         if self.connected:
@@ -1134,12 +1157,20 @@ class GameClient:
                 return True
             y_offset += 20
         
-        # Zone de l'inventaire
+        # Zone de l'inventaire avec défilement
         inventory = player.get('inventory', {})
         inv_start_y = y_offset + 15  # Position "--- Inventaire ---"
         y_offset = inv_start_y + 25  # Position du premier objet d'inventaire
         
-        for item_id, item_data in inventory.items():
+        # Convertir la liste des objets d'inventaire en liste indexée
+        inventory_items = list(inventory.items())
+        
+        # Calculer les objets visibles selon le défilement
+        start_index = self.inventory_scroll
+        end_index = min(len(inventory_items), start_index + self.max_inventory_lines)
+        
+        for i in range(start_index, end_index):
+            item_id, item_data = inventory_items[i]
             if y_offset <= mouse_y <= y_offset + 20:
                 # Clic sur un objet de l'inventaire
                 item_type = item_data.get('type', '')
@@ -1168,9 +1199,9 @@ class GameClient:
             
         player = self.players[self.my_player_id]
         
-        # Agrandir l'inventaire pour inclure les stats
+        # Ajuster la taille et position de l'inventaire pour éviter les barres HP/Mana
         inv_x, inv_y = 50, 50
-        inv_width, inv_height = 400, 500
+        inv_width, inv_height = 400, 400
         pygame.draw.rect(self.screen, (50, 50, 50), (inv_x, inv_y, inv_width, inv_height))
         pygame.draw.rect(self.screen, WHITE, (inv_x, inv_y, inv_width, inv_height), 2)
         
@@ -1214,14 +1245,29 @@ class GameClient:
             self.screen.blit(item_text, (inv_x + 10, y_offset))
             y_offset += 20
         
-        # Inventaire
+        # Inventaire avec défilement
         inv_start_y = y_offset + 15
         inv_text = self.font.render("--- Inventaire ---", True, CYAN)
         self.screen.blit(inv_text, (inv_x + 10, inv_start_y))
         
         inventory = player.get('inventory', {})
+        inventory_items = list(inventory.items())  # Convertir en liste pour l'indexation
+        
+        # Afficher des informations de défilement si nécessaire
+        if len(inventory_items) > self.max_inventory_lines:
+            scroll_info = f"({self.inventory_scroll + 1}-{min(len(inventory_items), self.inventory_scroll + self.max_inventory_lines)}/{len(inventory_items)})"
+            scroll_text = pygame.font.Font(None, 16).render(scroll_info, True, GRAY)
+            self.screen.blit(scroll_text, (inv_x + 250, inv_start_y))
+        
         y_offset = inv_start_y + 25
-        for item_id, item_data in inventory.items():
+        
+        # Calculer les limites de défilement
+        start_index = self.inventory_scroll
+        end_index = min(len(inventory_items), start_index + self.max_inventory_lines)
+        
+        # Afficher seulement les objets visibles
+        for i in range(start_index, end_index):
+            item_id, item_data = inventory_items[i]
             color = RARITY_COLORS.get(item_data.get('rarity', 'common'), WHITE)
             item_type = item_data.get('type', '')
             
@@ -1238,26 +1284,13 @@ class GameClient:
             max_stack = item_data.get('max_stack', 1)
             
             if max_stack > 1:
-                quantity_text = f" ({quantity}/{max_stack})"
+                quantity_text = f" (x{quantity}/{max_stack})"
             else:
                 quantity_text = ""
             
             item_text = self.font.render(f"- {item_data['name']}{quantity_text}{action_text}", True, color)
             self.screen.blit(item_text, (inv_x + 10, y_offset))
             y_offset += 20
-        
-        # Instructions
-        help_y = inv_y + inv_height - 85
-        help_texts = [
-            "Clic gauche sur objet au sol pour ramasser",
-            "Clic gauche sur objet d'inventaire pour équiper/utiliser",
-            "Clic gauche sur objet équipé pour déséquiper",
-            "I pour ouvrir/fermer l'inventaire",
-            "C pour ouvrir/fermer le chat"
-        ]
-        for i, text in enumerate(help_texts):
-            help_text = pygame.font.Font(None, 16).render(text, True, GRAY)
-            self.screen.blit(help_text, (inv_x + 10, help_y + i * 16))
     
     def draw_dropped_items(self):
         """Dessine les objets au sol"""
