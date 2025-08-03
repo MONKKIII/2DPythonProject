@@ -63,6 +63,14 @@ class GameClient:
         self.show_combat_log = False  # Logs masqués par défaut
         self.selected_class = "Warrior"
         
+        # Dungeon system
+        self.dungeons = {}  # Information sur les donjons disponibles
+        self.current_dungeon = None  # Donjon actuel du joueur
+        self.dungeon_players = []  # Autres joueurs dans le même donjon
+        self.show_dungeon_list = False  # Interface de sélection de donjon
+        self.dungeon_notifications = []  # Notifications de donjon (boss spawn, etc.)
+        self.boss_abilities_log = []  # Log des capacités de boss
+        
         # Input
         self.keys_pressed = set()
         self.player_name = ""
@@ -167,6 +175,45 @@ class GameClient:
                 self.combat_log.append(f"💊 {effect_text}")
                 if len(self.combat_log) > 3:  # Réduire à 3 lignes max
                     self.combat_log.pop(0)
+                    
+        # Messages du système de donjons
+        elif msg_type == 'dungeon_entered':
+            dungeon_name = message.get('dungeon_name', 'Donjon')
+            self.current_dungeon = {
+                'name': dungeon_name,
+                'instance_id': message.get('instance_id'),
+                'players_count': message.get('players_count', 1),
+                'max_players': message.get('max_players', 4)
+            }
+            self.dungeon_notifications.append(f"🏰 Entrée dans {dungeon_name}")
+            
+        elif msg_type == 'dungeon_left':
+            self.current_dungeon = None
+            self.dungeon_players = []
+            # Nettoyer toutes les notifications et logs de donjon quand on sort
+            self.dungeon_notifications = ["🚪 Vous avez quitté le donjon"]
+            self.boss_abilities_log = []
+            
+        elif msg_type == 'dungeon_error':
+            error_msg = message.get('message', 'Erreur de donjon')
+            self.dungeon_notifications.append(f"❌ {error_msg}")
+            
+        elif msg_type == 'boss_spawned':
+            boss_name = message.get('boss_name', 'Boss')
+            self.dungeon_notifications.append(f"🐉 {boss_name} apparaît!")
+            
+        elif msg_type == 'boss_ability':
+            ability_log = message.get('log', '')
+            self.boss_abilities_log.append(ability_log)
+            if len(self.boss_abilities_log) > 5:  # Garder 5 capacités max
+                self.boss_abilities_log.pop(0)
+            
+        elif msg_type == 'dungeon_completed':
+            completion_msg = message.get('message', 'Donjon terminé!')
+            bonus_text = message.get('bonus_text', '')
+            self.dungeon_notifications.append(f"🏆 {completion_msg}")
+            if bonus_text:
+                self.dungeon_notifications.append(f"💰 {bonus_text}")
     
     def send_message(self, message):
         if self.connected:
@@ -222,6 +269,13 @@ class GameClient:
                         self.show_controls = not self.show_controls
                     elif event.key == pygame.K_l:  # Touche L pour masquer/afficher les logs
                         self.show_combat_log = not self.show_combat_log
+                    elif event.key == pygame.K_p:  # Touche P pour afficher les donjons
+                        self.show_dungeon_list = not self.show_dungeon_list
+                    elif event.key == pygame.K_e:  # Touche E pour entrer dans un donjon proche
+                        self.try_enter_nearby_dungeon()
+                    elif event.key == pygame.K_r:  # Touche R pour quitter le donjon actuel
+                        if self.current_dungeon:
+                            self.leave_current_dungeon()
                     elif event.key == pygame.K_1 and self.show_stats_panel:
                         self.upgrade_stat('attack')
                     elif event.key == pygame.K_2 and self.show_stats_panel:
@@ -588,6 +642,66 @@ class GameClient:
         
         return nearest_monster
     
+    def try_enter_nearby_dungeon(self):
+        """Tente d'entrer dans un donjon proche"""
+        if not self.my_player_id or self.my_player_id not in self.players:
+            return
+            
+        if self.current_dungeon:
+            self.dungeon_notifications.append("⚠️ Vous êtes déjà dans un donjon!")
+            return
+            
+        player = self.players[self.my_player_id]
+        
+        # Positions des donjons (hardcodées selon server.py)
+        dungeon_portals = {
+            'goblin_cave': {'x': 1600, 'y': 1200, 'name': 'Caverne des Gobelins', 'level': 3},
+            'shadow_temple': {'x': 800, 'y': 400, 'name': 'Temple des Ombres', 'level': 7},
+            'dragon_lair': {'x': 2400, 'y': 1600, 'name': 'Antre du Dragon', 'level': 12}
+        }
+        
+        # Chercher le donjon le plus proche
+        closest_dungeon = None
+        min_distance = float('inf')
+        
+        for dungeon_id, portal in dungeon_portals.items():
+            distance = ((player['x'] - portal['x']) ** 2 + (player['y'] - portal['y']) ** 2) ** 0.5
+            if distance < 100 and distance < min_distance:  # Dans un rayon de 100 pixels
+                min_distance = distance
+                closest_dungeon = dungeon_id
+        
+        if closest_dungeon:
+            portal = dungeon_portals[closest_dungeon]
+            if player['level'] < portal['level']:
+                self.dungeon_notifications.append(f"❌ Niveau {portal['level']} requis pour {portal['name']}")
+            else:
+                self.send_message({
+                    'type': 'enter_dungeon',
+                    'dungeon_id': closest_dungeon
+                })
+        else:
+            self.dungeon_notifications.append("❌ Aucun donjon à proximité (portez-vous près d'un portail et appuyez sur E)")
+    
+    def leave_current_dungeon(self):
+        """Quitte le donjon actuel"""
+        self.send_message({
+            'type': 'leave_dungeon'
+        })
+        # Nettoyer immédiatement l'interface locale (avant même la réponse du serveur)
+        self.clear_dungeon_ui()
+    
+    def clear_dungeon_ui(self):
+        """Nettoie tous les éléments d'interface liés aux donjons"""
+        self.current_dungeon = None
+        self.dungeon_players = []
+        self.boss_abilities_log = []
+        # Garder seulement un message de sortie temporaire
+        self.dungeon_notifications = ["🚪 Interface de donjon nettoyée"]
+        # Réinitialiser les timestamps
+        if hasattr(self, 'notification_times'):
+            import time
+            self.notification_times = [time.time()]
+    
     def draw_name_input(self):
         # Draw background
         self.screen.fill(BLACK)
@@ -751,6 +865,9 @@ class GameClient:
         # Draw dropped items
         self.draw_dropped_items()
         
+        # Draw dungeon portals
+        self.draw_dungeon_portals()
+        
         # Draw minimap
         self.draw_minimap()
         
@@ -774,6 +891,9 @@ class GameClient:
         
         # Toujours afficher les barres de HP et Mana
         self.draw_health_mana_bars()
+        
+        # Interface des donjons
+        self.draw_dungeon_ui()
     
     def draw_health_mana_bars(self):
         """Dessine les barres de HP et Mana en bas de l'écran"""
@@ -869,6 +989,9 @@ class GameClient:
                 "I: Ouvrir inventaire",
                 "H: Afficher/masquer aide",
                 "L: Afficher/masquer logs",
+                "P: Liste des donjons",
+                "E: Entrer dans un donjon (près d'un portail)",
+                "R: Quitter le donjon actuel",
                 "",
                 f"Classe: {player.get('player_class', 'Warrior')}"
             ]
@@ -1156,6 +1279,278 @@ class GameClient:
                 if abs(mouse_pos[0] - screen_x) < 20 and abs(mouse_pos[1] - screen_y) < 20:
                     name_text = pygame.font.Font(None, 18).render(item_data.get('item_name', 'Item'), True, color)
                     self.screen.blit(name_text, (screen_x + 10, screen_y - 10))
+    
+    def draw_dungeon_portals(self):
+        """Dessine les portails de donjons sur la carte"""
+        if not self.my_player_id or self.my_player_id not in self.players:
+            return
+            
+        player = self.players[self.my_player_id]
+        
+        # Positions des portails de donjons (selon server.py)
+        dungeon_portals = {
+            'goblin_cave': {
+                'x': 1600, 'y': 1200, 
+                'name': 'Caverne des Gobelins', 
+                'level': 3,
+                'color': GREEN
+            },
+            'shadow_temple': {
+                'x': 800, 'y': 400, 
+                'name': 'Temple des Ombres', 
+                'level': 7,
+                'color': PURPLE
+            },
+            'dragon_lair': {
+                'x': 2400, 'y': 1600, 
+                'name': 'Antre du Dragon', 
+                'level': 12,
+                'color': RED
+            }
+        }
+        
+        for dungeon_id, portal in dungeon_portals.items():
+            # Convertir les coordonnées monde en coordonnées écran
+            screen_x, screen_y = self.world_to_screen(portal['x'], portal['y'])
+            
+            # Ne dessiner que si visible à l'écran
+            if -50 <= screen_x <= SCREEN_WIDTH + 50 and -50 <= screen_y <= SCREEN_HEIGHT + 50:
+                # Vérifier si le joueur a le niveau requis
+                can_enter = player['level'] >= portal['level']
+                color = portal['color'] if can_enter else GRAY
+                
+                # Dessiner le portail comme un grand cercle avec bordure
+                pygame.draw.circle(self.screen, BLACK, (int(screen_x), int(screen_y)), 25)
+                pygame.draw.circle(self.screen, color, (int(screen_x), int(screen_y)), 22)
+                
+                # Symbole au centre
+                pygame.draw.circle(self.screen, WHITE, (int(screen_x), int(screen_y)), 8)
+                
+                # Nom du donjon
+                name_text = pygame.font.Font(None, 18).render(portal['name'], True, color)
+                name_rect = name_text.get_rect(center=(screen_x, screen_y + 35))
+                # Fond noir pour lisibilité
+                pygame.draw.rect(self.screen, BLACK, name_rect.inflate(10, 4))
+                self.screen.blit(name_text, name_rect)
+                
+                # Niveau requis
+                level_text = pygame.font.Font(None, 16).render(f"Niv. {portal['level']}", True, color)
+                level_rect = level_text.get_rect(center=(screen_x, screen_y + 50))
+                pygame.draw.rect(self.screen, BLACK, level_rect.inflate(8, 2))
+                self.screen.blit(level_text, level_rect)
+                
+                # Indication d'entrée si proche
+                distance = ((player['x'] - portal['x']) ** 2 + (player['y'] - portal['y']) ** 2) ** 0.5
+                if distance < 100:
+                    if can_enter:
+                        hint_text = pygame.font.Font(None, 18).render("Appuyez sur E pour entrer", True, WHITE)
+                        hint_rect = hint_text.get_rect(center=(screen_x, screen_y - 35))
+                        pygame.draw.rect(self.screen, BLACK, hint_rect.inflate(10, 4))
+                        self.screen.blit(hint_text, hint_rect)
+                    else:
+                        hint_text = pygame.font.Font(None, 18).render(f"Niveau {portal['level']} requis", True, RED)
+                        hint_rect = hint_text.get_rect(center=(screen_x, screen_y - 35))
+                        pygame.draw.rect(self.screen, BLACK, hint_rect.inflate(10, 4))
+                        self.screen.blit(hint_text, hint_rect)
+    
+    def draw_dungeon_ui(self):
+        """Dessine l'interface spécifique aux donjons"""
+        # Afficher les informations du donjon actuel
+        if self.current_dungeon:
+            self.draw_current_dungeon_info()
+        
+        # Afficher les notifications de donjon
+        self.draw_dungeon_notifications()
+        
+        # Afficher le log des capacités de boss
+        self.draw_boss_abilities_log()
+        
+        # Afficher la liste des donjons si demandée
+        if self.show_dungeon_list:
+            self.draw_dungeon_list()
+    
+    def draw_current_dungeon_info(self):
+        """Affiche les informations du donjon actuel en haut à droite"""
+        if not self.current_dungeon:
+            return
+            
+        info_x = SCREEN_WIDTH - 250
+        info_y = 10
+        info_width = 240
+        info_height = 80
+        
+        # Fond de l'info
+        pygame.draw.rect(self.screen, (40, 40, 40), (info_x, info_y, info_width, info_height))
+        pygame.draw.rect(self.screen, ORANGE, (info_x, info_y, info_width, info_height), 2)
+        
+        # Titre
+        title_text = self.font.render("🏰 DONJON ACTUEL", True, ORANGE)
+        self.screen.blit(title_text, (info_x + 10, info_y + 10))
+        
+        # Nom du donjon
+        name_text = self.font.render(self.current_dungeon['name'], True, WHITE)
+        self.screen.blit(name_text, (info_x + 10, info_y + 30))
+        
+        # Nombre de joueurs
+        players_text = self.font.render(
+            f"Joueurs: {self.current_dungeon['players_count']}/{self.current_dungeon['max_players']}", 
+            True, WHITE
+        )
+        self.screen.blit(players_text, (info_x + 10, info_y + 50))
+        
+        # Instructions de sortie
+        exit_text = pygame.font.Font(None, 16).render("R pour quitter", True, GRAY)
+        self.screen.blit(exit_text, (info_x + 180, info_y + 65))
+    
+    def draw_dungeon_notifications(self):
+        """Affiche les notifications de donjon"""
+        if not self.dungeon_notifications:
+            return
+            
+        # Nettoyer les anciennes notifications (plus de 8 secondes)
+        import time
+        current_time = time.time()
+        if not hasattr(self, 'notification_times'):
+            self.notification_times = []
+        
+        # Synchroniser les timestamps avec les notifications
+        while len(self.notification_times) < len(self.dungeon_notifications):
+            self.notification_times.append(current_time)
+        
+        # Supprimer les notifications trop anciennes
+        new_notifications = []
+        new_times = []
+        for i, (notification, timestamp) in enumerate(zip(self.dungeon_notifications, self.notification_times)):
+            if current_time - timestamp < 8.0:  # 8 secondes
+                new_notifications.append(notification)
+                new_times.append(timestamp)
+        
+        self.dungeon_notifications = new_notifications
+        self.notification_times = new_times
+        
+        # Si plus de notifications, arrêter
+        if not self.dungeon_notifications:
+            return
+        
+        # Limiter à 5 notifications récentes
+        if len(self.dungeon_notifications) > 5:
+            self.dungeon_notifications = self.dungeon_notifications[-5:]
+            self.notification_times = self.notification_times[-5:]
+        
+        # Position des notifications (côté droit, au milieu)
+        notif_x = SCREEN_WIDTH - 350
+        notif_y = 200
+        
+        for i, notification in enumerate(self.dungeon_notifications):
+            # Couleur basée sur le type de notification
+            if "❌" in notification:
+                color = RED
+            elif "🏆" in notification or "💰" in notification:
+                color = YELLOW
+            elif "🐉" in notification:
+                color = RED
+            elif "🚪" in notification:
+                color = CYAN
+            else:
+                color = WHITE
+            
+            # Fond translucide
+            notif_text = self.font.render(notification, True, color)
+            notif_rect = notif_text.get_rect()
+            notif_rect.x = notif_x
+            notif_rect.y = notif_y + i * 25
+            
+            pygame.draw.rect(self.screen, (0, 0, 0, 128), notif_rect.inflate(20, 5))
+            pygame.draw.rect(self.screen, color, notif_rect.inflate(20, 5), 1)
+            self.screen.blit(notif_text, notif_rect)
+    
+    def draw_boss_abilities_log(self):
+        """Affiche le log des capacités de boss"""
+        # Ne pas afficher si on n'est pas dans un donjon
+        if not self.current_dungeon or not self.boss_abilities_log:
+            return
+            
+        # Position du log des capacités (en bas à droite)
+        log_x = SCREEN_WIDTH - 400
+        log_y = SCREEN_HEIGHT - 150
+        
+        # Titre
+        title_text = self.font.render("🐉 CAPACITÉS DU BOSS", True, RED)
+        title_rect = title_text.get_rect()
+        title_rect.x = log_x
+        title_rect.y = log_y
+        
+        pygame.draw.rect(self.screen, BLACK, title_rect.inflate(10, 5))
+        self.screen.blit(title_text, title_rect)
+        
+        # Afficher les 5 dernières capacités
+        for i, ability in enumerate(self.boss_abilities_log[-5:]):
+            ability_text = self.font.render(ability, True, YELLOW)
+            ability_rect = ability_text.get_rect()
+            ability_rect.x = log_x
+            ability_rect.y = log_y + 25 + i * 20
+            
+            pygame.draw.rect(self.screen, BLACK, ability_rect.inflate(8, 3))
+            self.screen.blit(ability_text, ability_rect)
+    
+    def draw_dungeon_list(self):
+        """Affiche la liste des donjons disponibles"""
+        if not self.my_player_id or self.my_player_id not in self.players:
+            return
+            
+        player = self.players[self.my_player_id]
+        
+        # Position de la liste (centre de l'écran)
+        list_x = SCREEN_WIDTH // 2 - 200
+        list_y = SCREEN_HEIGHT // 2 - 150
+        list_width = 400
+        list_height = 300
+        
+        # Fond de la liste
+        pygame.draw.rect(self.screen, (30, 30, 30), (list_x, list_y, list_width, list_height))
+        pygame.draw.rect(self.screen, WHITE, (list_x, list_y, list_width, list_height), 3)
+        
+        # Titre
+        title_text = self.big_font.render("🏰 DONJONS DISPONIBLES", True, WHITE)
+        title_rect = title_text.get_rect(center=(SCREEN_WIDTH // 2, list_y + 30))
+        self.screen.blit(title_text, title_rect)
+        
+        # Liste des donjons
+        dungeons_info = [
+            {"name": "Caverne des Gobelins", "level": 3, "max_players": 4, "description": "Donjon débutant avec le Roi des Gobelins"},
+            {"name": "Temple des Ombres", "level": 7, "max_players": 3, "description": "Donjon intermédiaire avec le Seigneur des Ombres"},
+            {"name": "Antre du Dragon", "level": 12, "max_players": 5, "description": "Donjon avancé avec le Dragon Ancien"}
+        ]
+        
+        y_offset = list_y + 70
+        for i, dungeon in enumerate(dungeons_info):
+            can_enter = player['level'] >= dungeon['level']
+            color = WHITE if can_enter else GRAY
+            
+            # Nom du donjon
+            name_text = self.font.render(f"• {dungeon['name']}", True, color)
+            self.screen.blit(name_text, (list_x + 20, y_offset))
+            
+            # Niveau requis
+            level_text = self.font.render(f"Niveau {dungeon['level']}+ | Max {dungeon['max_players']} joueurs", True, color)
+            self.screen.blit(level_text, (list_x + 20, y_offset + 20))
+            
+            # Description
+            desc_text = pygame.font.Font(None, 18).render(dungeon['description'], True, color)
+            self.screen.blit(desc_text, (list_x + 20, y_offset + 40))
+            
+            y_offset += 80
+        
+        # Instructions
+        instructions = [
+            "Appuyez-vous près d'un portail et appuyez sur E pour entrer",
+            "P pour fermer cette liste | R pour quitter un donjon actuel"
+        ]
+        
+        for i, instruction in enumerate(instructions):
+            inst_text = pygame.font.Font(None, 18).render(instruction, True, GRAY)
+            inst_rect = inst_text.get_rect(center=(SCREEN_WIDTH // 2, list_y + list_height - 40 + i * 20))
+            self.screen.blit(inst_text, inst_rect)
 
 if __name__ == "__main__":
     # Get server IP from command line argument or use localhost

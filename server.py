@@ -51,6 +51,7 @@ class Player:
     equipped: Dict[str, Item] = field(default_factory=dict)  # {"weapon": Item, "armor": Item}
     gold: int = 0  # Monnaie du jeu
     socket: Any = None  # Référence socket pour communication
+    dungeon_instance: str = ""  # ID de l'instance de donjon actuelle
 
 @dataclass
 class DroppedItem:
@@ -72,6 +73,34 @@ class Monster:
     xp_reward: int
     alive: bool = True
     target_player: str = None
+    is_boss: bool = False  # Nouveau: marquer les boss
+    boss_abilities: List[str] = field(default_factory=list)  # Capacités spéciales des boss
+
+@dataclass
+class Dungeon:
+    id: str
+    name: str
+    level_requirement: int
+    max_players: int
+    instance_id: str
+    x: float  # Position d'entrée du donjon
+    y: float
+    width: float = 400  # Taille du donjon
+    height: float = 400
+    boss_id: str = ""  # ID du boss principal
+    players: List[str] = field(default_factory=list)  # Joueurs dans le donjon
+    completed: bool = False
+    created_time: float = field(default_factory=time.time)
+
+@dataclass
+class DungeonInstance:
+    instance_id: str
+    dungeon_template_id: str
+    players: List[str] = field(default_factory=list)
+    monsters: Dict[str, Monster] = field(default_factory=dict)
+    boss_spawned: bool = False
+    completed: bool = False
+    created_time: float = field(default_factory=time.time)
 
 class GameServer:
     def __init__(self, host='localhost', port=12345):
@@ -87,6 +116,11 @@ class GameServer:
         self.running = True
         self.lock = threading.Lock()  # Pour la synchronisation
         
+        # Nouveau: Système de donjons
+        self.dungeons: Dict[str, Dungeon] = {}  # Templates de donjons
+        self.dungeon_instances: Dict[str, DungeonInstance] = {}  # Instances actives
+        self.dungeon_counter = 0  # Pour générer des IDs uniques d'instances
+        
         # Classes de personnages
         self.class_stats = {
             "Warrior": {"hp": 120, "attack": 12, "defense": 8, "speed": 4, "mana": 30, "crit": 0.05},
@@ -100,6 +134,9 @@ class GameServer:
         
         # Initialize items database
         self.init_items()
+        
+        # Initialize dungeons
+        self.init_dungeons()
         
     def spawn_monsters(self):
         """Spawn random monsters on the map"""
@@ -186,6 +223,51 @@ class GameServer:
         self.items["power_ring"] = Item("power_ring", "Anneau de Puissance", "accessory", "epic", {"attack": 2, "defense": 2, "speed": 2}, {}, "accessory", "Bonus à tout", False, True, 2)
         self.items["regen_amulet"] = Item("regen_amulet", "Amulette de Régénération", "accessory", "rare", {"hp_regen": 2}, {}, "accessory", "Régénère la vie", False, True, 3)
         self.items["speed_boots"] = Item("speed_boots", "Bottes de Vitesse", "accessory", "uncommon", {"speed": 3}, {}, "accessory", "Déplacement rapide", False, True, 5)
+        
+        # Objets légendaires pour donjons
+        self.items["dragonslayer_sword"] = Item("dragonslayer_sword", "Épée Tueuse de Dragons", "weapon", "legendary", {"attack": 15, "critical_chance": 25}, {}, "weapon", "Forgée dans le feu des dragons", False, True, 1)
+        self.items["archmage_staff"] = Item("archmage_staff", "Bâton d'Archimage", "weapon", "legendary", {"attack": 12, "max_mana": 50}, {}, "weapon", "Concentre la magie pure", False, True, 1)
+        self.items["shadow_blade"] = Item("shadow_blade", "Lame d'Ombre", "weapon", "legendary", {"attack": 10, "critical_chance": 40, "speed": 5}, {}, "weapon", "Frappe depuis les ténèbres", False, True, 1)
+        self.items["titan_armor"] = Item("titan_armor", "Armure de Titan", "armor", "legendary", {"defense": 12, "max_hp": 100}, {}, "armor", "Protection des anciens", False, True, 1)
+        self.items["crown_of_kings"] = Item("crown_of_kings", "Couronne des Rois", "accessory", "legendary", {"attack": 5, "defense": 5, "max_hp": 50, "max_mana": 30}, {}, "accessory", "Règne éternel", False, True, 1)
+    
+    def init_dungeons(self):
+        """Initialize dungeon templates"""
+        # Donjon pour débutants (Niveau 3+)
+        self.dungeons["goblin_cave"] = Dungeon(
+            id="goblin_cave",
+            name="Caverne des Gobelins",
+            level_requirement=3,
+            max_players=4,
+            instance_id="",
+            x=1600,  # Centre du monde
+            y=1200,
+            boss_id="goblin_king"
+        )
+        
+        # Donjon intermédiaire (Niveau 7+)
+        self.dungeons["shadow_temple"] = Dungeon(
+            id="shadow_temple",
+            name="Temple des Ombres",
+            level_requirement=7,
+            max_players=3,
+            instance_id="",
+            x=800,   # Zone forêt
+            y=400,
+            boss_id="shadow_lord"
+        )
+        
+        # Donjon avancé (Niveau 12+)
+        self.dungeons["dragon_lair"] = Dungeon(
+            id="dragon_lair",
+            name="Antre du Dragon",
+            level_requirement=12,
+            max_players=5,
+            instance_id="",
+            x=2400,  # Zone volcan
+            y=1600,
+            boss_id="ancient_dragon"
+        )
     
     def start_server(self):
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -368,6 +450,19 @@ class GameServer:
                     item_id = message.get('item_id')
                     if player and item_id in player.inventory:
                         self.use_item(player, item_id)
+                        
+            elif msg_type == 'enter_dungeon':
+                with self.lock:
+                    player = self.clients.get(client_socket)
+                    dungeon_id = message.get('dungeon_id')
+                    if player and player.alive and dungeon_id in self.dungeons:
+                        self.enter_dungeon(player, dungeon_id)
+                        
+            elif msg_type == 'leave_dungeon':
+                with self.lock:
+                    player = self.clients.get(client_socket)
+                    if player:
+                        self.leave_dungeon(player)
         except Exception as e:
             print(f"Erreur traitement message {message}: {e}")
             traceback.print_exc()
@@ -396,19 +491,31 @@ class GameServer:
             player.xp += monster.xp_reward
             combat_log += f" | {monster_name} vaincu (+{monster.xp_reward} XP)"
             
-            # Drop d'objet possible
-            self.drop_item(monster.x, monster.y)
+            # Drop d'objet possible (meilleur pour les boss)
+            if monster.is_boss:
+                self.drop_boss_loot(monster.x, monster.y)
+                # Marquer le donjon comme terminé
+                self.complete_dungeon(monster.id)
+            else:
+                self.drop_item(monster.x, monster.y)
             
             # Check level up
             if player.xp >= player.xp_to_next:
                 self.level_up_player(player)
                 combat_log += f" | NIVEAU {player.level}!"
             
-            # Respawn monster after 10 seconds
-            threading.Timer(10.0, self.respawn_monster, args=(monster.id,)).start()
+            # Respawn monster after 10 seconds (sauf pour les boss de donjon)
+            if not monster.is_boss:
+                threading.Timer(10.0, self.respawn_monster, args=(monster.id,)).start()
         else:
             # Monster attacks back
             damage_to_player = max(1, monster.attack - player.defense)
+            
+            # Boss abilities
+            if monster.is_boss and random.random() < 0.3:  # 30% chance d'utiliser une capacité
+                self.use_boss_ability(monster, player)
+                return  # La capacité remplace l'attaque normale
+            
             player.hp -= damage_to_player
             combat_log += f" | 🛡️ -{damage_to_player} HP"
             
@@ -916,7 +1023,338 @@ class GameServer:
             player.mana = int(player.max_mana * mana_ratio)
         else:
             player.mana = player.max_mana
-            player.mana = player.max_mana
+    
+    def enter_dungeon(self, player: Player, dungeon_id: str):
+        """Fait entrer un joueur dans un donjon"""
+        dungeon_template = self.dungeons.get(dungeon_id)
+        if not dungeon_template:
+            return
+            
+        # Vérifier le niveau requis
+        if player.level < dungeon_template.level_requirement:
+            self.send_to_client(player.socket, {
+                'type': 'dungeon_error',
+                'message': f"Niveau {dungeon_template.level_requirement} requis pour ce donjon!"
+            })
+            return
+            
+        # Chercher une instance existante avec de la place
+        available_instance = None
+        for instance in self.dungeon_instances.values():
+            if (instance.dungeon_template_id == dungeon_id and 
+                len(instance.players) < dungeon_template.max_players and
+                not instance.completed):
+                available_instance = instance
+                break
+                
+        # Créer une nouvelle instance si nécessaire
+        if not available_instance:
+            instance_id = f"dungeon_instance_{self.dungeon_counter}"
+            self.dungeon_counter += 1
+            
+            available_instance = DungeonInstance(
+                instance_id=instance_id,
+                dungeon_template_id=dungeon_id
+            )
+            self.dungeon_instances[instance_id] = available_instance
+            
+            # Spawn les monstres du donjon
+            self.spawn_dungeon_monsters(available_instance, dungeon_template)
+            
+        # Ajouter le joueur à l'instance
+        available_instance.players.append(player.id)
+        
+        # Téléporter le joueur dans le donjon
+        player.x = dungeon_template.x + random.randint(-50, 50)
+        player.y = dungeon_template.y + random.randint(-50, 50)
+        
+        # Marquer le joueur comme étant dans un donjon
+        player.dungeon_instance = available_instance.instance_id
+        
+        # Notifier le joueur
+        self.send_to_client(player.socket, {
+            'type': 'dungeon_entered',
+            'dungeon_name': dungeon_template.name,
+            'instance_id': available_instance.instance_id,
+            'players_count': len(available_instance.players),
+            'max_players': dungeon_template.max_players
+        })
+        
+        # Spawn le boss si assez de joueurs
+        if len(available_instance.players) >= 2 and not available_instance.boss_spawned:
+            self.spawn_dungeon_boss(available_instance, dungeon_template)
+    
+    def leave_dungeon(self, player: Player):
+        """Fait sortir un joueur du donjon"""
+        if not hasattr(player, 'dungeon_instance') or not player.dungeon_instance:
+            return
+            
+        instance = self.dungeon_instances.get(player.dungeon_instance)
+        if not instance:
+            return
+            
+        # Retirer le joueur de l'instance
+        if player.id in instance.players:
+            instance.players.remove(player.id)
+            
+        # Téléporter le joueur à l'extérieur
+        player.x = 1600  # Centre du monde
+        player.y = 1200
+        player.dungeon_instance = ""
+        
+        # Si plus de joueurs, nettoyer l'instance
+        if len(instance.players) == 0:
+            del self.dungeon_instances[instance.instance_id]
+            
+        self.send_to_client(player.socket, {
+            'type': 'dungeon_left'
+        })
+    
+    def spawn_dungeon_monsters(self, instance: DungeonInstance, dungeon_template: Dungeon):
+        """Spawn les monstres d'un donjon"""
+        monster_count = 5  # Nombre de monstres par donjon
+        
+        for i in range(monster_count):
+            monster_id = f"{instance.instance_id}_mob_{i}"
+            
+            # Stats selon le niveau du donjon
+            level_multiplier = dungeon_template.level_requirement / 3.0
+            base_hp = int(40 * level_multiplier)
+            base_attack = int(12 * level_multiplier)
+            base_defense = int(6 * level_multiplier)
+            base_xp = int(25 * level_multiplier)
+            
+            monster = Monster(
+                id=monster_id,
+                x=dungeon_template.x + random.randint(-150, 150),
+                y=dungeon_template.y + random.randint(-150, 150),
+                hp=base_hp,
+                max_hp=base_hp,
+                attack=base_attack,
+                defense=base_defense,
+                xp_reward=base_xp
+            )
+            
+            instance.monsters[monster_id] = monster
+            # Ajouter aussi aux monstres globaux pour le combat
+            self.monsters[monster_id] = monster
+    
+    def spawn_dungeon_boss(self, instance: DungeonInstance, dungeon_template: Dungeon):
+        """Spawn le boss du donjon"""
+        boss_id = f"{instance.instance_id}_boss"
+        
+        # Stats de boss selon le template
+        boss_stats = {
+            "goblin_king": {
+                "name": "Roi des Gobelins",
+                "hp": 300,
+                "attack": 25,
+                "defense": 10,
+                "xp": 150,
+                "abilities": ["rage", "summon_minions"]
+            },
+            "shadow_lord": {
+                "name": "Seigneur des Ombres", 
+                "hp": 500,
+                "attack": 35,
+                "defense": 15,
+                "xp": 300,
+                "abilities": ["shadow_strike", "invisibility"]
+            },
+            "ancient_dragon": {
+                "name": "Dragon Ancien",
+                "hp": 800,
+                "attack": 50,
+                "defense": 25,
+                "xp": 500,
+                "abilities": ["fire_breath", "wing_attack", "heal"]
+            }
+        }
+        
+        boss_template = boss_stats.get(dungeon_template.boss_id, boss_stats["goblin_king"])
+        
+        boss = Monster(
+            id=boss_id,
+            x=dungeon_template.x,
+            y=dungeon_template.y + 100,  # Au fond du donjon
+            hp=boss_template["hp"],
+            max_hp=boss_template["hp"],
+            attack=boss_template["attack"],
+            defense=boss_template["defense"],
+            xp_reward=boss_template["xp"],
+            is_boss=True,
+            boss_abilities=boss_template["abilities"]
+        )
+        
+        instance.monsters[boss_id] = boss
+        self.monsters[boss_id] = boss
+        instance.boss_spawned = True
+        
+        # Notifier les joueurs du spawn du boss
+        for player_id in instance.players:
+            player = self.players.get(player_id)
+            if player:
+                self.send_to_client(player.socket, {
+                    'type': 'boss_spawned',
+                    'boss_name': boss_template["name"]
+                })
+    
+    def use_boss_ability(self, boss: Monster, target_player: Player):
+        """Utilise une capacité spéciale de boss"""
+        if not boss.boss_abilities:
+            return
+            
+        ability = random.choice(boss.boss_abilities)
+        ability_log = ""
+        
+        if ability == "rage":
+            # Augmente l'attaque du boss
+            boss.attack = int(boss.attack * 1.5)
+            ability_log = f"🔥 {boss.id.split('_')[0]} entre en rage! (+50% ATK)"
+            # Retirer le bonus après 10 secondes
+            threading.Timer(10.0, lambda: setattr(boss, 'attack', int(boss.attack / 1.5))).start()
+            
+        elif ability == "summon_minions":
+            # Spawn 2 petits monstres
+            for i in range(2):
+                minion_id = f"{boss.id}_minion_{i}_{time.time()}"
+                minion = Monster(
+                    id=minion_id,
+                    x=boss.x + random.randint(-50, 50),
+                    y=boss.y + random.randint(-50, 50),
+                    hp=30,
+                    max_hp=30,
+                    attack=8,
+                    defense=2,
+                    xp_reward=10
+                )
+                self.monsters[minion_id] = minion
+            ability_log = f"👹 {boss.id.split('_')[0]} invoque des serviteurs!"
+            
+        elif ability == "shadow_strike":
+            # Attaque qui ignore la défense
+            damage = boss.attack
+            target_player.hp -= damage
+            ability_log = f"⚫ Frappe d'Ombre! -{damage} HP (ignore défense)"
+            
+        elif ability == "invisibility":
+            # Réduit les dégâts reçus temporairement
+            boss.defense = int(boss.defense * 2)
+            ability_log = f"👻 {boss.id.split('_')[0]} devient invisible! (+100% DEF)"
+            threading.Timer(8.0, lambda: setattr(boss, 'defense', int(boss.defense / 2))).start()
+            
+        elif ability == "fire_breath":
+            # Attaque en zone (tous les joueurs dans le donjon)
+            damage = int(boss.attack * 0.8)
+            ability_log = f"🔥 Souffle de Dragon! -{damage} HP à tous!"
+            # Trouver tous les joueurs dans le même donjon
+            for player_id, player in self.players.items():
+                if hasattr(player, 'dungeon_instance') and player.dungeon_instance:
+                    instance = self.dungeon_instances.get(player.dungeon_instance)
+                    if instance and boss.id in instance.monsters:
+                        player.hp -= damage
+                        
+        elif ability == "wing_attack":
+            # Repousse et étourdit
+            ability_log = f"🦅 Attaque d'Ailes! Vous êtes repoussé!"
+            # Téléporter le joueur un peu plus loin
+            target_player.x += random.randint(-100, 100)
+            target_player.y += random.randint(-100, 100)
+            
+        elif ability == "heal":
+            # Le boss se soigne
+            heal_amount = int(boss.max_hp * 0.2)
+            boss.hp = min(boss.max_hp, boss.hp + heal_amount)
+            ability_log = f"✨ {boss.id.split('_')[0]} se soigne! +{heal_amount} HP"
+        
+        # Broadcast l'utilisation de la capacité
+        self.broadcast_message({
+            'type': 'boss_ability',
+            'log': ability_log,
+            'boss': self.monster_to_dict(boss),
+            'player': self.player_to_dict(target_player)
+        })
+    
+    def drop_boss_loot(self, boss_x, boss_y):
+        """Drop des objets légendaires pour les boss"""
+        # 80% de chance de drop pour les boss
+        if random.random() < 0.8:
+            # Sélectionner un objet légendaire
+            legendary_items = [item_id for item_id, item in self.items.items() if item.rarity == "legendary"]
+            if legendary_items:
+                item_id = random.choice(legendary_items)
+                drop_id = f"drop_{self.item_counter}"
+                self.item_counter += 1
+                
+                drop = DroppedItem(
+                    drop_id=drop_id,
+                    item_id=item_id,
+                    x=boss_x,
+                    y=boss_y,
+                    drop_time=time.time()
+                )
+                self.dropped_items[drop_id] = drop
+                
+                # Notifier tous les clients
+                self.broadcast_message({
+                    'type': 'legendary_drop',
+                    'drop_id': drop_id,
+                    'item_id': item_id,
+                    'x': boss_x,
+                    'y': boss_y
+                })
+    
+    def complete_dungeon(self, boss_id: str):
+        """Marque un donjon comme terminé"""
+        # Trouver l'instance du donjon
+        for instance in self.dungeon_instances.values():
+            if boss_id in instance.monsters:
+                instance.completed = True
+                
+                # Donner des récompenses bonus aux joueurs
+                bonus_xp = 100
+                bonus_gold = 50
+                
+                for player_id in instance.players:
+                    player = self.players.get(player_id)
+                    if player:
+                        player.xp += bonus_xp
+                        player.gold += bonus_gold
+                        
+                        self.send_to_client(player.socket, {
+                            'type': 'dungeon_completed',
+                            'bonus_xp': bonus_xp,
+                            'bonus_gold': bonus_gold
+                        })
+                        
+                        # Check level up avec le bonus XP
+                        if player.xp >= player.xp_to_next:
+                            self.level_up_player(player)
+                
+                # Programmer la suppression de l'instance après 2 minutes
+                threading.Timer(120.0, self.cleanup_dungeon_instance, args=(instance.instance_id,)).start()
+                break
+    
+    def cleanup_dungeon_instance(self, instance_id: str):
+        """Nettoie une instance de donjon terminée"""
+        instance = self.dungeon_instances.get(instance_id)
+        if not instance:
+            return
+            
+        # Téléporter tous les joueurs restants à l'extérieur
+        for player_id in instance.players[:]:  # Copie de la liste
+            player = self.players.get(player_id)
+            if player:
+                self.leave_dungeon(player)
+                
+        # Supprimer tous les monstres de l'instance
+        for monster_id in list(instance.monsters.keys()):
+            if monster_id in self.monsters:
+                del self.monsters[monster_id]
+                
+        # Supprimer l'instance
+        if instance_id in self.dungeon_instances:
+            del self.dungeon_instances[instance_id]
     
     def game_loop(self):
         """Main game loop - sends game state to all clients"""
@@ -936,7 +1374,8 @@ class GameServer:
                         'type': 'game_state',
                         'players': {pid: self.player_to_dict(p) for pid, p in self.players.items()},
                         'monsters': {mid: self.monster_to_dict(m) for mid, m in self.monsters.items()},
-                        'dropped_items': {did: self.dropped_item_to_dict(d) for did, d in self.dropped_items.items()}
+                        'dropped_items': {did: self.dropped_item_to_dict(d) for did, d in self.dropped_items.items()},
+                        'dungeons': {did: self.dungeon_to_dict(d) for did, d in self.dungeons.items()}
                     }
                 
                 if self.clients:  # Only broadcast if there are clients
@@ -968,6 +1407,7 @@ class GameServer:
             'max_mana': player.max_mana,
             'critical_chance': player.critical_chance,
             'gold': player.gold,
+            'dungeon_instance': getattr(player, 'dungeon_instance', ''),
             'inventory': {item_id: {
                 'name': item_stack.item.name, 
                 'type': item_stack.item.item_type, 
@@ -1002,6 +1442,16 @@ class GameServer:
             'x': dropped_item.x,
             'y': dropped_item.y,
             'drop_time': dropped_item.drop_time
+        }
+    
+    def dungeon_to_dict(self, dungeon: Dungeon):
+        return {
+            'id': dungeon.id,
+            'name': dungeon.name,
+            'level_requirement': dungeon.level_requirement,
+            'max_players': dungeon.max_players,
+            'x': dungeon.x,
+            'y': dungeon.y
         }
     
     def broadcast_message(self, message):
