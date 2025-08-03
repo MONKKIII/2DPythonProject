@@ -1,0 +1,16 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Start RPG Server",
+			"type": "shell",
+			"command": "C:/Users/Gildwen/Desktop/Coding Project/2DPythonProject/.venv/Scripts/python.exe",
+			"args": [
+				"server.py"
+			],
+			"group": "build",
+			"isBackground": true,
+			"problemMatcher": []
+		}
+	]
+}
