@@ -493,11 +493,13 @@ class GameServer:
             
             # Drop d'objet possible (meilleur pour les boss)
             if monster.is_boss:
-                self.drop_boss_loot(monster.x, monster.y)
+                monster_instance = getattr(monster, 'dungeon_instance', None)
+                self.drop_boss_loot(monster.x, monster.y, monster_instance)
                 # Marquer le donjon comme terminé
                 self.complete_dungeon(monster.id)
             else:
-                self.drop_item(monster.x, monster.y)
+                monster_instance = getattr(monster, 'dungeon_instance', None)
+                self.drop_item(monster.x, monster.y, monster_instance)
             
             # Check level up
             if player.xp >= player.xp_to_next:
@@ -526,13 +528,14 @@ class GameServer:
                 # Schedule respawn after 5 seconds
                 threading.Timer(5.0, self.respawn_player, args=(player,)).start()
         
-        # Broadcast combat result
-        self.broadcast_message({
+        # Broadcast combat result to same instance
+        player_instance = getattr(player, 'dungeon_instance', None)
+        self.broadcast_to_instance({
             'type': 'combat_result',
             'log': combat_log,
             'player': self.player_to_dict(player),
             'monster': self.monster_to_dict(monster)
-        })
+        }, player_instance)
     
     def level_up_player(self, player: Player):
         player.level += 1
@@ -599,7 +602,8 @@ class GameServer:
                         player.xp += monster.xp_reward
                         ability_log += f" | +{monster.xp_reward} XP"
                         # Drop d'objet possible
-                        self.drop_item(monster.x, monster.y)
+                        monster_instance = getattr(monster, 'dungeon_instance', None)
+                        self.drop_item(monster.x, monster.y, monster_instance)
                         threading.Timer(10.0, self.respawn_monster, args=(target_id,)).start()
                         
         elif player.player_class == "Archer" and ability == "multishot":
@@ -618,7 +622,8 @@ class GameServer:
                             monster.alive = False
                             player.xp += monster.xp_reward
                             # Drop d'objet possible
-                            self.drop_item(monster.x, monster.y)
+                            monster_instance = getattr(monster, 'dungeon_instance', None)
+                            self.drop_item(monster.x, monster.y, monster_instance)
                             threading.Timer(10.0, self.respawn_monster, args=(monster.id,)).start()
                 
                 if targets_hit > 0:
@@ -636,11 +641,12 @@ class GameServer:
         
         if ability_used:
             player.last_ability_use = current_time
-            self.broadcast_message({
+            player_instance = getattr(player, 'dungeon_instance', None)
+            self.broadcast_to_instance({
                 'type': 'ability_used',
                 'log': ability_log,
                 'player': self.player_to_dict(player)
-            })
+            }, player_instance)
     
     def regenerate_mana(self):
         """Régénère la mana de tous les joueurs"""
@@ -729,7 +735,7 @@ class GameServer:
             xp_reward=random.randint(15, 30)
         )
     
-    def drop_item(self, monster_x, monster_y):
+    def drop_item(self, monster_x, monster_y, monster_instance=None):
         """Détermine si un objet doit être lâché et le crée"""
         # 30% de chance de drop d'objet
         if random.random() < 0.3:
@@ -754,7 +760,8 @@ class GameServer:
                 'x': monster_x,
                 'y': monster_y
             }
-            self.broadcast_message(drop_message)
+            # Diffuser selon l'instance du monstre
+            self.broadcast_to_instance(drop_message, monster_instance)
     
     def select_random_item(self):
         """Sélectionne un objet aléatoire selon la rareté"""
@@ -820,10 +827,12 @@ class GameServer:
                 })
                 
                 # Notifier tous les clients que l'objet a été ramassé
-                self.broadcast_message({
+                # L'objet était au sol donc on diffuse selon l'instance du joueur qui le ramasse
+                player_instance = getattr(player, 'dungeon_instance', None)
+                self.broadcast_to_instance({
                     'type': 'item_removed',
                     'drop_id': drop_id
-                })
+                }, player_instance)
                 return
         
         # Vérifier si l'inventaire a de la place pour un nouvel item
@@ -843,10 +852,12 @@ class GameServer:
         })
         
         # Notifier tous les clients que l'objet a été ramassé
-        self.broadcast_message({
+        # L'objet était au sol donc on diffuse selon l'instance du joueur qui le ramasse
+        player_instance = getattr(player, 'dungeon_instance', None)
+        self.broadcast_to_instance({
             'type': 'item_removed',
             'drop_id': drop_id
-        })
+        }, player_instance)
     
     def equip_item(self, player, item_id):
         """Équipe un objet"""
@@ -1104,7 +1115,22 @@ class GameServer:
         
         # Si plus de joueurs, nettoyer l'instance
         if len(instance.players) == 0:
+            # Supprimer tous les monstres de cette instance des monstres globaux
+            monsters_to_remove = []
+            for monster_id, monster in self.monsters.items():
+                # Supprimer par attribut dungeon_instance
+                if hasattr(monster, 'dungeon_instance') and monster.dungeon_instance == instance.instance_id:
+                    monsters_to_remove.append(monster_id)
+                # Sécurité supplémentaire : supprimer par nom d'instance dans l'ID
+                elif monster_id.startswith(instance.instance_id):
+                    monsters_to_remove.append(monster_id)
+            
+            for monster_id in monsters_to_remove:
+                del self.monsters[monster_id]
+                print(f"Monstre de donjon supprimé: {monster_id}")  # Debug
+            
             del self.dungeon_instances[instance.instance_id]
+            print(f"Instance de donjon supprimée: {instance.instance_id}")  # Debug
             
         self.send_to_client(player.socket, {
             'type': 'dungeon_left'
@@ -1134,6 +1160,9 @@ class GameServer:
                 defense=base_defense,
                 xp_reward=base_xp
             )
+            
+            # Marquer le monstre comme appartenant à cette instance de donjon
+            monster.dungeon_instance = instance.instance_id
             
             instance.monsters[monster_id] = monster
             # Ajouter aussi aux monstres globaux pour le combat
@@ -1186,6 +1215,9 @@ class GameServer:
             boss_abilities=boss_template["abilities"]
         )
         
+        # Marquer le boss comme appartenant à cette instance de donjon
+        boss.dungeon_instance = instance.instance_id
+        
         instance.monsters[boss_id] = boss
         self.monsters[boss_id] = boss
         instance.boss_spawned = True
@@ -1228,6 +1260,8 @@ class GameServer:
                     defense=2,
                     xp_reward=10
                 )
+                # Marquer le serviteur comme appartenant à la même instance que le boss
+                minion.dungeon_instance = getattr(boss, 'dungeon_instance', None)
                 self.monsters[minion_id] = minion
             ability_log = f"👹 {boss.id.split('_')[0]} invoque des serviteurs!"
             
@@ -1267,15 +1301,16 @@ class GameServer:
             boss.hp = min(boss.max_hp, boss.hp + heal_amount)
             ability_log = f"✨ {boss.id.split('_')[0]} se soigne! +{heal_amount} HP"
         
-        # Broadcast l'utilisation de la capacité
-        self.broadcast_message({
+        # Broadcast l'utilisation de la capacité aux joueurs de la même instance
+        boss_instance = getattr(boss, 'dungeon_instance', None)
+        self.broadcast_to_instance({
             'type': 'boss_ability',
             'log': ability_log,
             'boss': self.monster_to_dict(boss),
             'player': self.player_to_dict(target_player)
         })
     
-    def drop_boss_loot(self, boss_x, boss_y):
+    def drop_boss_loot(self, boss_x, boss_y, boss_instance=None):
         """Drop des objets légendaires pour les boss"""
         # 80% de chance de drop pour les boss
         if random.random() < 0.8:
@@ -1295,14 +1330,14 @@ class GameServer:
                 )
                 self.dropped_items[drop_id] = drop
                 
-                # Notifier tous les clients
-                self.broadcast_message({
+                # Notifier tous les clients de la même instance
+                self.broadcast_to_instance({
                     'type': 'legendary_drop',
                     'drop_id': drop_id,
                     'item_id': item_id,
                     'x': boss_x,
                     'y': boss_y
-                })
+                }, boss_instance)
     
     def complete_dungeon(self, boss_id: str):
         """Marque un donjon comme terminé"""
@@ -1356,9 +1391,33 @@ class GameServer:
         if instance_id in self.dungeon_instances:
             del self.dungeon_instances[instance_id]
     
+    def cleanup_orphaned_dungeon_monsters(self):
+        """Nettoie tous les monstres de donjon orphelins"""
+        monsters_to_remove = []
+        
+        for monster_id, monster in self.monsters.items():
+            # Supprimer tous les monstres qui ont un ID de donjon
+            if monster_id.startswith("dungeon_instance_"):
+                # Vérifier si l'instance existe encore
+                parts = monster_id.split("_")
+                if len(parts) >= 3:
+                    potential_instance_id = "_".join(parts[:3])  # "dungeon_instance_X"
+                    if potential_instance_id not in self.dungeon_instances:
+                        monsters_to_remove.append(monster_id)
+                        print(f"Monstre orphelin trouvé: {monster_id}")
+        
+        # Supprimer les monstres orphelins
+        for monster_id in monsters_to_remove:
+            del self.monsters[monster_id]
+            print(f"Monstre orphelin supprimé: {monster_id}")
+        
+        if monsters_to_remove:
+            print(f"Nettoyage terminé: {len(monsters_to_remove)} monstres orphelins supprimés")
+    
     def game_loop(self):
         """Main game loop - sends game state to all clients"""
         last_mana_regen = time.time()
+        last_cleanup = time.time()
         
         while self.running:
             try:
@@ -1369,22 +1428,123 @@ class GameServer:
                     self.regenerate_mana()
                     last_mana_regen = current_time
                 
-                with self.lock:
-                    game_state = {
-                        'type': 'game_state',
-                        'players': {pid: self.player_to_dict(p) for pid, p in self.players.items()},
-                        'monsters': {mid: self.monster_to_dict(m) for mid, m in self.monsters.items()},
-                        'dropped_items': {did: self.dropped_item_to_dict(d) for did, d in self.dropped_items.items()},
-                        'dungeons': {did: self.dungeon_to_dict(d) for did, d in self.dungeons.items()}
-                    }
+                # Nettoyage préventif des monstres orphelins toutes les 30 secondes
+                if current_time - last_cleanup >= 30.0:
+                    self.cleanup_orphaned_dungeon_monsters()
+                    last_cleanup = current_time
                 
-                if self.clients:  # Only broadcast if there are clients
-                    self.broadcast_message(game_state)
+                with self.lock:
+                    # Envoyer des game_state spécifiques selon l'instance de chaque joueur
+                    self.send_instance_specific_game_states()
                     
                 time.sleep(1/30)  # 30 FPS
             except Exception as e:
                 print(f"Erreur game loop: {e}")
                 time.sleep(0.1)
+    
+    def send_instance_specific_game_states(self):
+        """Envoie des game states spécifiques selon l'instance de chaque joueur"""
+        if not self.clients:
+            return
+        
+        # Grouper les joueurs par instance
+        players_by_instance = {
+            'world': [],  # Joueurs dans le monde principal
+        }
+        
+        # Ajouter les instances de donjons
+        for instance_id in self.dungeon_instances.keys():
+            players_by_instance[instance_id] = []
+        
+        # Répartir les joueurs par instance
+        for player in self.players.values():
+            if hasattr(player, 'dungeon_instance') and player.dungeon_instance:
+                # Joueur dans un donjon
+                if player.dungeon_instance in players_by_instance:
+                    players_by_instance[player.dungeon_instance].append(player)
+            else:
+                # Joueur dans le monde principal
+                players_by_instance['world'].append(player)
+        
+        # Envoyer le game state du monde principal
+        if players_by_instance['world']:
+            world_game_state = self.create_world_game_state()
+            for player in players_by_instance['world']:
+                if player.socket:
+                    self.send_to_client(player.socket, world_game_state)
+        
+        # Envoyer les game states des donjons
+        for instance_id, players_in_instance in players_by_instance.items():
+            if instance_id != 'world' and players_in_instance:
+                dungeon_game_state = self.create_dungeon_game_state(instance_id)
+                for player in players_in_instance:
+                    if player.socket:
+                        self.send_to_client(player.socket, dungeon_game_state)
+    
+    def create_world_game_state(self):
+        """Crée le game state pour le monde principal"""
+        # Joueurs dans le monde principal seulement
+        world_players = {}
+        for player in self.players.values():
+            if not hasattr(player, 'dungeon_instance') or not player.dungeon_instance:
+                world_players[player.id] = self.player_to_dict(player)
+        
+        # Monstres du monde principal seulement (exclure les monstres de donjons)
+        world_monsters = {}
+        for monster_id, monster in self.monsters.items():
+            # Exclure les monstres qui appartiennent à une instance de donjon
+            # Utiliser la même logique que le nettoyage : vérifier l'attribut dungeon_instance
+            is_dungeon_monster = False
+            
+            # Vérification par attribut dungeon_instance
+            if hasattr(monster, 'dungeon_instance') and monster.dungeon_instance:
+                is_dungeon_monster = True
+            
+            # Sécurité supplémentaire : vérification par nom d'ID
+            if monster_id.startswith("dungeon_instance_"):
+                is_dungeon_monster = True
+            
+            if not is_dungeon_monster:
+                world_monsters[monster_id] = self.monster_to_dict(monster)
+        
+        return {
+            'type': 'game_state',
+            'players': world_players,
+            'monsters': world_monsters,
+            'dropped_items': {did: self.dropped_item_to_dict(d) for did, d in self.dropped_items.items()},
+            'dungeons': {did: self.dungeon_to_dict(d) for did, d in self.dungeons.items()}
+        }
+    
+    def create_dungeon_game_state(self, instance_id: str):
+        """Crée le game state pour une instance de donjon spécifique"""
+        instance = self.dungeon_instances.get(instance_id)
+        if not instance:
+            return {'type': 'game_state', 'players': {}, 'monsters': {}, 'dropped_items': {}}
+        
+        # Joueurs dans cette instance de donjon seulement
+        dungeon_players = {}
+        for player_id in instance.players:
+            if player_id in self.players:
+                player = self.players[player_id]
+                dungeon_players[player_id] = self.player_to_dict(player)
+        
+        # Monstres de cette instance de donjon seulement
+        dungeon_monsters = {}
+        for monster_id, monster in instance.monsters.items():
+            if monster_id in self.monsters:  # Vérifier que le monstre existe encore
+                dungeon_monsters[monster_id] = self.monster_to_dict(monster)
+        
+        # Objets droppés dans le donjon (filtrer par position si nécessaire)
+        # Pour l'instant, on peut inclure tous les objets droppés
+        # TODO: Filtrer par zone de donjon si nécessaire
+        
+        return {
+            'type': 'game_state',
+            'players': dungeon_players,
+            'monsters': dungeon_monsters,
+            'dropped_items': {did: self.dropped_item_to_dict(d) for did, d in self.dropped_items.items()},
+            'dungeons': {}  # Pas besoin d'afficher les portails dans les donjons
+        }
     
     def player_to_dict(self, player: Player):
         return {
@@ -1470,6 +1630,37 @@ class GameServer:
             except Exception as e:
                 print(f"Erreur envoi broadcast: {e}")
                 disconnected_clients.append(client_socket)
+        
+        # Remove disconnected clients
+        for client in disconnected_clients:
+            self.disconnect_client(client)
+    
+    def broadcast_to_instance(self, message, instance_id=None):
+        """Send message to players in specific instance"""
+        if not self.clients:
+            return
+            
+        # Si instance_id est None, envoyer au monde principal
+        if instance_id is None:
+            target_players = [p for p in self.players.values() 
+                            if not hasattr(p, 'dungeon_instance') or not p.dungeon_instance]
+        else:
+            # Envoyer aux joueurs de l'instance spécifique
+            target_players = [p for p in self.players.values() 
+                            if hasattr(p, 'dungeon_instance') and p.dungeon_instance == instance_id]
+        
+        message_str = json.dumps(message) + '\n'
+        disconnected_clients = []
+        
+        for player in target_players:
+            if player.socket:
+                try:
+                    player.socket.send(message_str.encode('utf-8'))
+                except (ConnectionResetError, BrokenPipeError, OSError):
+                    disconnected_clients.append(player.socket)
+                except Exception as e:
+                    print(f"Erreur envoi instance broadcast: {e}")
+                    disconnected_clients.append(player.socket)
         
         # Remove disconnected clients
         for client in disconnected_clients:
